@@ -5,133 +5,197 @@ using System.Text;
 
 namespace TikTokWeb
 {
+    /// <summary>
+    /// Generates the X-Bogus signature token for TikTok web API requests.
+    /// Constructs a payload from double-MD5 hashes of query, body, and user agent,
+    /// then RC4-encrypts and encodes it with a custom base64 alphabet.
+    /// </summary>
     public static class Bogus
     {
-        private const string StandardB64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        private const string CustomB64Alphabet = "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe";
+        private const string CustomBase64Alphabet = "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=";
+        private const string StandardBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 
-        private static readonly Dictionary<char, char> Base64CharMap;
-
-        static Bogus()
+        /// <summary>
+        /// Computes the MD5 hash of raw bytes and returns it as a lowercase hex string.
+        /// </summary>
+        private static string ComputeMd5Hex(byte[] data)
         {
-            Base64CharMap = new Dictionary<char, char>();
-            for (int i = 0; i < StandardB64Alphabet.Length; i++)
-            {
-                Base64CharMap[StandardB64Alphabet[i]] = CustomB64Alphabet[i];
-            }
+            return Convert.ToHexStringLower(MD5.HashData(data));
         }
 
-        private static string CustomB64Encode(byte[] inputBuffer)
+        /// <summary>
+        /// Computes the MD5 hash of a UTF-8 string and returns it as a lowercase hex string.
+        /// </summary>
+        private static string ComputeMd5Hex(string input)
         {
-            string standardBase64 = Convert.ToBase64String(inputBuffer);
-            var result = new StringBuilder();
-            foreach (char character in standardBase64)
-            {
-                result.Append(Base64CharMap.TryGetValue(character, out char mappedChar) ? mappedChar : character);
-            }
-            return result.ToString();
+            return Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes(input)));
         }
 
-        private static byte[] ComputeMd5Hash(byte[] data)
+        /// <summary>
+        /// Converts a lowercase hex string (e.g. "d41d8c") into its raw byte representation.
+        /// Each pair of hex characters becomes one byte.
+        /// </summary>
+        private static byte[] HexStringToBytes(string hexString)
         {
-            using (var md5 = MD5.Create())
+            int byteCount = hexString.Length >> 1;
+            byte[] result = new byte[byteCount];
+            for (int i = 0; i < byteCount; i++)
             {
-                return md5.ComputeHash(data);
+                result[i] = (byte)((HexCharToValue(hexString[2 * i]) << 4) | HexCharToValue(hexString[2 * i + 1]));
             }
+            return result;
         }
 
-        private static byte[] Rc4Encrypt(byte[] key, byte[] plaintext)
+        /// <summary>
+        /// Returns the numeric value (0-15) of a single lowercase hex character.
+        /// </summary>
+        private static int HexCharToValue(char c)
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+            return 0;
+        }
+
+        /// <summary>
+        /// Performs RC4 stream cipher encryption/decryption on the data using the given key.
+        /// Initializes a 256-byte S-box via key-scheduling, then XORs each data byte
+        /// with the generated keystream.
+        /// </summary>
+        private static byte[] Rc4Encrypt(byte[] key, byte[] data)
         {
             int[] sBox = new int[256];
             for (int i = 0; i < 256; i++)
                 sBox[i] = i;
 
             int swapIndex = 0;
-            int keyLength = key.Length;
             for (int i = 0; i < 256; i++)
             {
-                swapIndex = (swapIndex + sBox[i] + key[i % keyLength]) & 0xFF;
-                (sBox[i], sBox[swapIndex]) = (sBox[swapIndex], sBox[i]);
+                swapIndex = (swapIndex + sBox[i] + key[i % key.Length]) % 256;
+                int temp = sBox[i];
+                sBox[i] = sBox[swapIndex];
+                sBox[swapIndex] = temp;
             }
 
-            byte[] output = new byte[plaintext.Length];
-            int stateIndexI = 0;
-            int stateIndexJ = 0;
-            for (int n = 0; n < plaintext.Length; n++)
+            int indexI = 0;
+            int indexJ = 0;
+            byte[] output = new byte[data.Length];
+            for (int n = 0; n < data.Length; n++)
             {
-                stateIndexI = (stateIndexI + 1) & 0xFF;
-                stateIndexJ = (stateIndexJ + sBox[stateIndexI]) & 0xFF;
-                (sBox[stateIndexI], sBox[stateIndexJ]) = (sBox[stateIndexJ], sBox[stateIndexI]);
-                int keyStreamByte = sBox[(sBox[stateIndexI] + sBox[stateIndexJ]) & 0xFF];
-                output[n] = (byte)(plaintext[n] ^ keyStreamByte);
+                indexI = (indexI + 1) % 256;
+                indexJ = (indexJ + sBox[indexI]) % 256;
+                int temp = sBox[indexI];
+                sBox[indexI] = sBox[indexJ];
+                sBox[indexJ] = temp;
+                output[n] = (byte)(255 & (data[n] ^ sBox[(sBox[indexI] + sBox[indexJ]) % 256]));
             }
             return output;
         }
 
-        private static byte ComputeXorChecksum(byte[] buffer)
+        /// <summary>
+        /// Encodes a byte array using a custom base64-like scheme (no padding).
+        /// Processes the input in groups of 3 bytes, producing 4 characters each
+        /// by indexing into the provided alphabet table.
+        /// </summary>
+        private static string CustomBase64Encode(byte[] input, string alphabet)
         {
-            int accumulator = 0;
-            foreach (byte byteValue in buffer)
+            int groupCount = input.Length / 3;
+            var encoded = new StringBuilder(groupCount * 4);
+            for (int i = 0; i < groupCount; i++)
             {
-                accumulator ^= byteValue;
+                int byte1 = input[3 * i] & 255;
+                int byte2 = input[3 * i + 1] & 255;
+                int byte3 = input[3 * i + 2] & 255;
+                int combined = (byte1 << 16) | (byte2 << 8) | byte3;
+                encoded.Append(alphabet[(combined & 16515072) >> 18]);
+                encoded.Append(alphabet[(combined & 258048) >> 12]);
+                encoded.Append(alphabet[(combined & 4032) >> 6]);
+                encoded.Append(alphabet[combined & 63]);
             }
-            return (byte)(accumulator & 0xFF);
+            return encoded.ToString();
         }
 
-        public static string Encrypt(string queryParams, string postData, string userAgent, long timestamp)
+        /// <summary>
+        /// Generates the X-Bogus signature for a TikTok API request.
+        /// 
+        /// Builds an 18-byte payload containing:
+        ///   - Header byte (0x40) and RC4 key bytes [0x00, 0x01, 0x0E]
+        ///   - Last 2 bytes of MD5(MD5(query))
+        ///   - Last 2 bytes of MD5(MD5(body))
+        ///   - Last 2 bytes of MD5(Base64(RC4(userAgent)))
+        ///   - 4-byte big-endian timestamp (seconds)
+        ///   - 4-byte big-endian canvas fingerprint value
+        /// 
+        /// Appends an XOR checksum byte, RC4-encrypts with key [0xFF],
+        /// prepends a 2-byte header [0x02, 0xFF], and custom-base64 encodes the result.
+        /// </summary>
+        /// <param name="query">The full URL query string to sign.</param>
+        /// <param name="userAgent">The browser User-Agent string.</param>
+        /// <param name="canvasValue">Canvas fingerprint value (browser-dependent).</param>
+        /// <param name="body">The request body string. Empty string if no body.</param>
+        /// <param name="timestampMs">Unix timestamp in milliseconds. Uses current time if null.</param>
+        /// <returns>The X-Bogus token string.</returns>
+        public static string Encrypt(string query, string userAgent, uint canvasValue, string body = "", long? timestampMs = null)
         {
-            byte[] userAgentKey = new byte[] { 0x00, 0x01, 0x0E };
-            byte[] encryptionKey = new byte[] { 0xFF };
-            uint magicConstant = 0x4A41279F;
+            byte[] rc4Key = { 0x00, 0x01, 0x0E };
+            string bodyMd5Hex = "d41d8cd98f00b204e9800998ecf8427e"; // MD5 of empty string
 
-            byte[] queryParamsHash = ComputeMd5Hash(ComputeMd5Hash(Encoding.UTF8.GetBytes(queryParams)));
-            byte[] postDataHash = ComputeMd5Hash(ComputeMd5Hash(Encoding.UTF8.GetBytes(postData)));
+            byte[] queryDoubleHash = HexStringToBytes(ComputeMd5Hex(HexStringToBytes(ComputeMd5Hex(query))));
 
-            byte[] encryptedUserAgent = Rc4Encrypt(userAgentKey, Encoding.UTF8.GetBytes(userAgent));
-            string userAgentBase64 = Convert.ToBase64String(encryptedUserAgent);
-            byte[] userAgentHash = ComputeMd5Hash(Encoding.ASCII.GetBytes(userAgentBase64));
+            if (!string.IsNullOrEmpty(body))
+                bodyMd5Hex = ComputeMd5Hex(body);
+            byte[] bodyDoubleHash = HexStringToBytes(ComputeMd5Hex(HexStringToBytes(bodyMd5Hex)));
 
-            var payloadParts = new List<byte>();
-            payloadParts.Add(0x40);
-            payloadParts.AddRange(userAgentKey);
-            payloadParts.Add(queryParamsHash[14]);
-            payloadParts.Add(queryParamsHash[15]);
-            payloadParts.Add(postDataHash[14]);
-            payloadParts.Add(postDataHash[15]);
-            payloadParts.Add(userAgentHash[14]);
-            payloadParts.Add(userAgentHash[15]);
+            var payload = new List<byte>();
+            payload.Add(0x40);
+            payload.AddRange(rc4Key);
+            payload.Add(queryDoubleHash[queryDoubleHash.Length - 2]);
+            payload.Add(queryDoubleHash[queryDoubleHash.Length - 1]);
+            payload.Add(bodyDoubleHash[bodyDoubleHash.Length - 2]);
+            payload.Add(bodyDoubleHash[bodyDoubleHash.Length - 1]);
 
-            uint timestampValue = (uint)(timestamp & 0xFFFFFFFF);
-            payloadParts.Add((byte)((timestampValue >> 24) & 0xFF));
-            payloadParts.Add((byte)((timestampValue >> 16) & 0xFF));
-            payloadParts.Add((byte)((timestampValue >> 8) & 0xFF));
-            payloadParts.Add((byte)(timestampValue & 0xFF));
+            byte[] encryptedUserAgent = Rc4Encrypt(rc4Key, Encoding.UTF8.GetBytes(userAgent));
+            string userAgentToken = CustomBase64Encode(encryptedUserAgent, StandardBase64Alphabet);
+            byte[] userAgentTokenHash = HexStringToBytes(ComputeMd5Hex(userAgentToken));
+            payload.Add(userAgentTokenHash[userAgentTokenHash.Length - 2]);
+            payload.Add(userAgentTokenHash[userAgentTokenHash.Length - 1]);
 
-            payloadParts.Add((byte)((magicConstant >> 24) & 0xFF));
-            payloadParts.Add((byte)((magicConstant >> 16) & 0xFF));
-            payloadParts.Add((byte)((magicConstant >> 8) & 0xFF));
-            payloadParts.Add((byte)(magicConstant & 0xFF));
+            long currentTimestampMs = timestampMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            uint timestampSeconds = (uint)(currentTimestampMs / 1000);
+            payload.Add((byte)((timestampSeconds >> 24) & 0xFF));
+            payload.Add((byte)((timestampSeconds >> 16) & 0xFF));
+            payload.Add((byte)((timestampSeconds >> 8) & 0xFF));
+            payload.Add((byte)(timestampSeconds & 0xFF));
 
-            byte[] payload = payloadParts.ToArray();
-            byte checksum = ComputeXorChecksum(payload);
+            payload.Add((byte)((canvasValue >> 24) & 0xFF));
+            payload.Add((byte)((canvasValue >> 16) & 0xFF));
+            payload.Add((byte)((canvasValue >> 8) & 0xFF));
+            payload.Add((byte)(canvasValue & 0xFF));
 
-            byte[] payloadWithChecksum = new byte[payload.Length + 1];
-            Array.Copy(payload, payloadWithChecksum, payload.Length);
-            payloadWithChecksum[payload.Length] = checksum;
+            byte[] payloadBytes = payload.ToArray();
+            int xorChecksum = 0;
+            foreach (byte b in payloadBytes)
+                xorChecksum ^= b;
 
-            byte[] encryptedPayload = Rc4Encrypt(encryptionKey, payloadWithChecksum);
+            byte[] payloadWithChecksum = new byte[payloadBytes.Length + 1];
+            Array.Copy(payloadBytes, payloadWithChecksum, payloadBytes.Length);
+            payloadWithChecksum[payloadBytes.Length] = (byte)(xorChecksum & 0xFF);
+
+            byte[] encryptedPayload = Rc4Encrypt(new byte[] { 0xFF }, payloadWithChecksum);
 
             byte[] finalOutput = new byte[2 + encryptedPayload.Length];
             finalOutput[0] = 0x02;
-            finalOutput[1] = encryptionKey[0];
+            finalOutput[1] = 0xFF;
             Array.Copy(encryptedPayload, 0, finalOutput, 2, encryptedPayload.Length);
 
-            return CustomB64Encode(finalOutput);
+            return CustomBase64Encode(finalOutput, CustomBase64Alphabet);
         }
 
-        public static string Sign(string queryString, string body, string userAgent, long timestamp)
+        /// <summary>
+        /// Convenience alias for <see cref="Encrypt"/>. Generates the X-Bogus signature token.
+        /// </summary>
+        public static string Sign(string query, string userAgent, uint canvasValue, string body = "", long? timestampMs = null)
         {
-            return Encrypt(queryString, body, userAgent, timestamp);
+            return Encrypt(query, userAgent, canvasValue, body, timestampMs);
         }
     }
 }
